@@ -188,7 +188,7 @@ func (c *moduleCache) writeImportMap() error {
 	}
 	c.mu.Unlock()
 
-	importMap := map[string]interface{}{
+	importMap := map[string]map[string]string{
 		"imports": modulesCopy,
 	}
 
