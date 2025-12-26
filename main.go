@@ -40,11 +40,12 @@ func run(cdnURL, outputDir, importName string) error {
 	}
 
 	cache := &moduleCache{
-		outputDir:  outputDir,
-		entryURL:   cdnURL,
-		importName: &importName,
-		modules:    make(map[string]string),
-		contents:   make(map[string]string),
+		outputDir:   outputDir,
+		entryURL:    cdnURL,
+		importName:  &importName,
+		modules:     make(map[string]string),
+		contents:    make(map[string]string),
+		importSpecs: make(map[string]string),
 	}
 
 	result := api.Build(api.BuildOptions{
@@ -60,6 +61,7 @@ func run(cdnURL, outputDir, importName string) error {
 					build.OnResolve(api.OnResolveOptions{Filter: ".*"},
 						func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 							if strings.HasPrefix(args.Path, "http://") || strings.HasPrefix(args.Path, "https://") {
+								cache.addImportSpec(args.Path, args.Path)
 								return api.OnResolveResult{
 									Path:      args.Path,
 									Namespace: "http",
@@ -70,6 +72,7 @@ func run(cdnURL, outputDir, importName string) error {
 								base, err := url.Parse(args.Importer)
 								if err == nil && (base.Scheme == "http" || base.Scheme == "https") {
 									resolved := resolveURL(base, args.Path)
+									cache.addImportSpec(args.Path, resolved)
 									return api.OnResolveResult{
 										Path:      resolved,
 										Namespace: "http",
@@ -142,12 +145,13 @@ func run(cdnURL, outputDir, importName string) error {
 }
 
 type moduleCache struct {
-	outputDir  string
-	entryURL   string
-	importName *string
-	modules    map[string]string
-	contents   map[string]string
-	mu         sync.Mutex
+	outputDir   string
+	entryURL    string
+	importName  *string
+	modules     map[string]string
+	contents    map[string]string
+	importSpecs map[string]string
+	mu          sync.Mutex
 }
 
 func (c *moduleCache) addModule(moduleURL, content string) string {
@@ -164,32 +168,31 @@ func (c *moduleCache) addModule(moduleURL, content string) string {
 	return localPath
 }
 
+func (c *moduleCache) addImportSpec(spec, fullURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.importSpecs[spec] = fullURL
+}
+
 func (c *moduleCache) writeImportMap() error {
 	c.mu.Lock()
-	modulesCopy := make(map[string]string, len(c.modules))
-	for k, v := range c.modules {
-		mappedPath := "./" + filepath.Join(c.outputDir, v)
-		modulesCopy[k] = mappedPath
+	importMapEntries := make(map[string]string)
 
-		// Also add path-only version for internal imports
-		if u, err := url.Parse(k); err == nil {
-			pathOnly := u.Path
-			if u.RawQuery != "" {
-				pathOnly += "?" + u.RawQuery
-			}
-			modulesCopy[pathOnly] = mappedPath
+	for spec, fullURL := range c.importSpecs {
+		if localPath, exists := c.modules[fullURL]; exists {
+			importMapEntries[spec] = "./" + filepath.Join(c.outputDir, localPath)
 		}
 	}
 
 	if c.importName != nil && *c.importName != "" {
 		if localPath, exists := c.modules[c.entryURL]; exists {
-			modulesCopy[*c.importName] = "./" + filepath.Join(c.outputDir, localPath)
+			importMapEntries[*c.importName] = "./" + filepath.Join(c.outputDir, localPath)
 		}
 	}
 	c.mu.Unlock()
 
 	importMap := map[string]map[string]string{
-		"imports": modulesCopy,
+		"imports": importMapEntries,
 	}
 
 	data, err := json.MarshalIndent(importMap, "", "  ")
