@@ -163,7 +163,7 @@ func (c *moduleCache) writeImportMap() error {
 	c.mu.Lock()
 	modulesCopy := make(map[string]string, len(c.modules))
 	for k, v := range c.modules {
-		modulesCopy[k] = v
+		modulesCopy[k] = "./" + v
 	}
 	c.mu.Unlock()
 
