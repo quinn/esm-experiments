@@ -168,7 +168,17 @@ func (c *moduleCache) writeImportMap() error {
 	c.mu.Lock()
 	modulesCopy := make(map[string]string, len(c.modules))
 	for k, v := range c.modules {
-		modulesCopy[k] = "./" + filepath.Join(c.outputDir, v)
+		mappedPath := "./" + filepath.Join(c.outputDir, v)
+		modulesCopy[k] = mappedPath
+
+		// Also add path-only version for internal imports
+		if u, err := url.Parse(k); err == nil {
+			pathOnly := u.Path
+			if u.RawQuery != "" {
+				pathOnly += "?" + u.RawQuery
+			}
+			modulesCopy[pathOnly] = mappedPath
+		}
 	}
 
 	if c.importName != nil && *c.importName != "" {
