@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/evanw/esbuild/pkg/api"
 )
@@ -78,7 +79,11 @@ func run(cdnURL, outputDir string) error {
 
 					build.OnLoad(api.OnLoadOptions{Filter: ".*", Namespace: "http"},
 						func(args api.OnLoadArgs) (api.OnLoadResult, error) {
-							if cached, ok := cache.contents[args.Path]; ok {
+							cache.mu.Lock()
+							cached, ok := cache.contents[args.Path]
+							cache.mu.Unlock()
+
+							if ok {
 								return api.OnLoadResult{
 									Contents: &cached,
 									Loader:   api.LoaderJS,
@@ -109,8 +114,18 @@ func run(cdnURL, outputDir string) error {
 		return fmt.Errorf("build failed with %d errors", len(result.Errors))
 	}
 
-	for moduleURL, content := range cache.contents {
+	cache.mu.Lock()
+	contentsCopy := make(map[string]string, len(cache.contents))
+	for k, v := range cache.contents {
+		contentsCopy[k] = v
+	}
+	cache.mu.Unlock()
+
+	for moduleURL, content := range contentsCopy {
+		cache.mu.Lock()
 		localPath := cache.modules[moduleURL]
+		cache.mu.Unlock()
+
 		fullPath := filepath.Join(outputDir, localPath)
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return err
@@ -127,9 +142,13 @@ type moduleCache struct {
 	outputDir string
 	modules   map[string]string
 	contents  map[string]string
+	mu        sync.Mutex
 }
 
 func (c *moduleCache) addModule(moduleURL, content string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if localPath, exists := c.modules[moduleURL]; exists {
 		return localPath
 	}
@@ -141,8 +160,15 @@ func (c *moduleCache) addModule(moduleURL, content string) string {
 }
 
 func (c *moduleCache) writeImportMap() error {
+	c.mu.Lock()
+	modulesCopy := make(map[string]string, len(c.modules))
+	for k, v := range c.modules {
+		modulesCopy[k] = v
+	}
+	c.mu.Unlock()
+
 	importMap := map[string]interface{}{
-		"imports": c.modules,
+		"imports": modulesCopy,
 	}
 
 	data, err := json.MarshalIndent(importMap, "", "  ")
