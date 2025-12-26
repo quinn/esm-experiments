@@ -4,7 +4,7 @@ set -e
 
 rm -rf cache
 go build -o esm-cache
-./esm-cache -url https://esm.sh/d3@7 -output cache
+./esm-cache -url https://esm.sh/d3@7 -output cache -name d3
 
 cat > test.html << 'HTMLSTART'
 <!doctype html>
@@ -24,7 +24,7 @@ cat >> test.html << 'HTMLEND'
         <svg width="500" height="500"></svg>
 
         <script type="module">
-            import * as d3 from "https://esm.sh/d3@7";
+            import * as d3 from "d3";
 
             const data = [30, 86, 168, 234, 155, 98];
             const svg = d3.select("svg");

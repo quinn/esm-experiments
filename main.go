@@ -20,6 +20,7 @@ import (
 func main() {
 	cdnURL := flag.String("url", "", "CDN URL to cache")
 	output := flag.String("output", "", "Output folder")
+	importName := flag.String("name", "", "Import name for top-level module")
 	flag.Parse()
 
 	if *cdnURL == "" || *output == "" {
@@ -27,21 +28,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(*cdnURL, *output); err != nil {
+	if err := run(*cdnURL, *output, *importName); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(cdnURL, outputDir string) error {
+func run(cdnURL, outputDir, importName string) error {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return err
 	}
 
 	cache := &moduleCache{
-		outputDir: outputDir,
-		modules:   make(map[string]string),
-		contents:  make(map[string]string),
+		outputDir:  outputDir,
+		entryURL:   cdnURL,
+		importName: &importName,
+		modules:    make(map[string]string),
+		contents:   make(map[string]string),
 	}
 
 	result := api.Build(api.BuildOptions{
@@ -139,10 +142,12 @@ func run(cdnURL, outputDir string) error {
 }
 
 type moduleCache struct {
-	outputDir string
-	modules   map[string]string
-	contents  map[string]string
-	mu        sync.Mutex
+	outputDir  string
+	entryURL   string
+	importName *string
+	modules    map[string]string
+	contents   map[string]string
+	mu         sync.Mutex
 }
 
 func (c *moduleCache) addModule(moduleURL, content string) string {
@@ -163,7 +168,13 @@ func (c *moduleCache) writeImportMap() error {
 	c.mu.Lock()
 	modulesCopy := make(map[string]string, len(c.modules))
 	for k, v := range c.modules {
-		modulesCopy[k] = "./" + v
+		modulesCopy[k] = "./" + filepath.Join(c.outputDir, v)
+	}
+
+	if c.importName != nil && *c.importName != "" {
+		if localPath, exists := c.modules[c.entryURL]; exists {
+			modulesCopy[*c.importName] = "./" + filepath.Join(c.outputDir, localPath)
+		}
 	}
 	c.mu.Unlock()
 
