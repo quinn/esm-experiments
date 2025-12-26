@@ -72,7 +72,9 @@ func run(cdnURL, outputDir, importName string) error {
 								base, err := url.Parse(args.Importer)
 								if err == nil && (base.Scheme == "http" || base.Scheme == "https") {
 									resolved := resolveURL(base, args.Path)
-									cache.addImportSpec(args.Path, resolved)
+									if !strings.HasPrefix(args.Path, ".") {
+										cache.addImportSpec(args.Path, resolved)
+									}
 									return api.OnResolveResult{
 										Path:      resolved,
 										Namespace: "http",
