@@ -1,26 +1,28 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 
 	"esm-cache/esm"
+
+	"gopkg.in/yaml.v3"
 )
 
+type ConfigFile struct {
+	EsmVendor esm.Config `yaml:"esm-vendor"`
+}
+
 func main() {
-	configFile := flag.String("config", "esm-cache.config.json", "Config file path (config file mode)")
+	configFile := flag.String("config", "ccf.yaml", "Config file path")
 	flag.Parse()
 
-	var config esm.Config
-
-	cfg, err := loadConfigFile(*configFile)
+	config, err := loadConfigFile(*configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config file: %v\n", err)
 		os.Exit(1)
 	}
-	config = cfg
 
 	if err := esm.Run(config); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -34,10 +36,10 @@ func loadConfigFile(path string) (esm.Config, error) {
 		return esm.Config{}, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var config esm.Config
-	if err := json.Unmarshal(data, &config); err != nil {
+	var configFile ConfigFile
+	if err := yaml.Unmarshal(data, &configFile); err != nil {
 		return esm.Config{}, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	return config, nil
+	return configFile.EsmVendor, nil
 }

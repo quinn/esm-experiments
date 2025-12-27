@@ -2,7 +2,7 @@
 
 set -e
 
-rm -rf esm-vendor
+rm -rf public/js/vendor
 go build -o esm-cache
 ./esm-cache
 

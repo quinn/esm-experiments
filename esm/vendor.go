@@ -18,15 +18,15 @@ import (
 
 // Module represents a single ESM module to vendor
 type Module struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
 }
 
 // Config holds the configuration for vendoring ESM modules
 type Config struct {
-	OutputDir  string   `json:"output"`
-	ImportPath string   `json:"import"`
-	Modules    []Module `json:"modules"`
+	OutputDir  string   `yaml:"output"`
+	ImportPath string   `yaml:"import"`
+	Modules    []Module `yaml:"modules"`
 }
 
 func Run(config Config) error {
