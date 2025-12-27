@@ -1,4 +1,4 @@
-module esm-cache
+module esm-vendor
 
 go 1.21
 

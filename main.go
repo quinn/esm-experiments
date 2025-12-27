@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"esm-cache/esm"
+	"esm-vendor/esm"
 
 	"gopkg.in/yaml.v3"
 )

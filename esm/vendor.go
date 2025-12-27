@@ -1,17 +1,20 @@
 package esm
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"text/template"
 
 	"github.com/evanw/esbuild/pkg/api"
 )
@@ -22,11 +25,18 @@ type Module struct {
 	URL  string `yaml:"url"`
 }
 
+// Template holds configuration for HTML template processing
+type Template struct {
+	Input  string `yaml:"input"`
+	Output string `yaml:"output"`
+}
+
 // Config holds the configuration for vendoring ESM modules
 type Config struct {
-	OutputDir  string   `yaml:"output"`
-	ImportPath string   `yaml:"import"`
-	Modules    []Module `yaml:"modules"`
+	OutputDir  string    `yaml:"output"`
+	ImportPath string    `yaml:"import"`
+	Modules    []Module  `yaml:"modules"`
+	Template   *Template `yaml:"template,omitempty"`
 }
 
 func Run(config Config) error {
@@ -81,7 +91,18 @@ func Run(config Config) error {
 		}
 	}
 
-	return cache.writeImportMap()
+	if err := cache.writeImportMap(); err != nil {
+		return err
+	}
+
+	// Process template if configured
+	if config.Template != nil && config.Template.Input != "" && config.Template.Output != "" {
+		if err := processTemplate(config, cache); err != nil {
+			return fmt.Errorf("failed to process template: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func processDependency(dep Module, cache *moduleCache) error {
@@ -272,4 +293,69 @@ func resolveURL(base *url.URL, ref string) string {
 		return ref
 	}
 	return base.ResolveReference(refURL).String()
+}
+
+func processTemplate(config Config, cache *moduleCache) error {
+	// Read template file
+	tmplContent, err := os.ReadFile(config.Template.Input)
+	if err != nil {
+		return fmt.Errorf("failed to read template file: %w", err)
+	}
+
+	// Parse template
+	tmpl, err := template.New("index").Parse(string(tmplContent))
+	if err != nil {
+		return fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	// Generate import map JSON
+	cache.mu.Lock()
+	importMapEntries := make(map[string]string)
+
+	for spec, fullURL := range cache.importSpecs {
+		if localPath, exists := cache.modules[fullURL]; exists {
+			importMapEntries[spec] = filepath.Join(cache.importPath, localPath)
+		}
+	}
+
+	for importName, entryURL := range cache.entryURLs {
+		if localPath, exists := cache.modules[entryURL]; exists {
+			importMapEntries[importName] = filepath.Join(cache.importPath, localPath)
+		}
+	}
+	cache.mu.Unlock()
+
+	importMap := map[string]map[string]string{
+		"imports": importMapEntries,
+	}
+
+	importMapJSON, err := json.MarshalIndent(importMap, "        ", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal import map: %w", err)
+	}
+
+	// Execute template
+	data := map[string]string{
+		"importmap": string(importMapJSON),
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	// Ensure output directory exists
+	outputDir := filepath.Dir(config.Template.Output)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Write output file
+	if err := os.WriteFile(config.Template.Output, buf.Bytes(), 0644); err != nil {
+		return fmt.Errorf("failed to write output file: %w", err)
+	}
+
+	slog.Debug("Generated from template", "output", config.Template.Output)
+
+	return nil
 }
