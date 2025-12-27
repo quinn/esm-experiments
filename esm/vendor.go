@@ -1,0 +1,241 @@
+package esm
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/evanw/esbuild/pkg/api"
+)
+
+// Config holds the configuration for caching ESM modules
+type Config struct {
+	URL        string
+	OutputDir  string
+	ImportName string
+}
+
+func Run(config Config) error {
+	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+		return err
+	}
+
+	cache := &moduleCache{
+		outputDir:   config.OutputDir,
+		entryURL:    config.URL,
+		importName:  config.ImportName,
+		modules:     make(map[string]string),
+		contents:    make(map[string]string),
+		importSpecs: make(map[string]string),
+	}
+
+	result := api.Build(api.BuildOptions{
+		EntryPoints: []string{config.URL},
+		Bundle:      true,
+		Write:       false,
+		Format:      api.FormatESModule,
+		Platform:    api.PlatformBrowser,
+		Plugins: []api.Plugin{
+			{
+				Name: "http-loader",
+				Setup: func(build api.PluginBuild) {
+					build.OnResolve(api.OnResolveOptions{Filter: ".*"},
+						func(args api.OnResolveArgs) (api.OnResolveResult, error) {
+							if strings.HasPrefix(args.Path, "http://") || strings.HasPrefix(args.Path, "https://") {
+								cache.addImportSpec(args.Path, args.Path)
+								return api.OnResolveResult{
+									Path:      args.Path,
+									Namespace: "http",
+								}, nil
+							}
+
+							if args.Importer != "" {
+								base, err := url.Parse(args.Importer)
+								if err == nil && (base.Scheme == "http" || base.Scheme == "https") {
+									resolved := resolveURL(base, args.Path)
+									if !strings.HasPrefix(args.Path, ".") {
+										cache.addImportSpec(args.Path, resolved)
+									}
+									return api.OnResolveResult{
+										Path:      resolved,
+										Namespace: "http",
+									}, nil
+								}
+							}
+
+							return api.OnResolveResult{}, nil
+						})
+
+					build.OnLoad(api.OnLoadOptions{Filter: ".*", Namespace: "http"},
+						func(args api.OnLoadArgs) (api.OnLoadResult, error) {
+							cache.mu.Lock()
+							cached, ok := cache.contents[args.Path]
+							cache.mu.Unlock()
+
+							if ok {
+								return api.OnLoadResult{
+									Contents: &cached,
+									Loader:   api.LoaderJS,
+								}, nil
+							}
+
+							content, err := downloadURL(args.Path)
+							if err != nil {
+								return api.OnLoadResult{}, err
+							}
+
+							cache.addModule(args.Path, content)
+
+							return api.OnLoadResult{
+								Contents: &content,
+								Loader:   api.LoaderJS,
+							}, nil
+						})
+				},
+			},
+		},
+	})
+
+	if len(result.Errors) > 0 {
+		for _, err := range result.Errors {
+			fmt.Fprintf(os.Stderr, "%s\n", err.Text)
+		}
+		return fmt.Errorf("build failed with %d errors", len(result.Errors))
+	}
+
+	cache.mu.Lock()
+	contentsCopy := make(map[string]string, len(cache.contents))
+	for k, v := range cache.contents {
+		contentsCopy[k] = v
+	}
+	cache.mu.Unlock()
+
+	for moduleURL, content := range contentsCopy {
+		cache.mu.Lock()
+		localPath := cache.modules[moduleURL]
+		cache.mu.Unlock()
+
+		fullPath := filepath.Join(config.OutputDir, localPath)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+
+	return cache.writeImportMap()
+}
+
+type moduleCache struct {
+	outputDir   string
+	entryURL    string
+	importName  string
+	modules     map[string]string
+	contents    map[string]string
+	importSpecs map[string]string
+	mu          sync.Mutex
+}
+
+func (c *moduleCache) addModule(moduleURL, content string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if localPath, exists := c.modules[moduleURL]; exists {
+		return localPath
+	}
+
+	localPath := urlToPath(moduleURL)
+	c.modules[moduleURL] = localPath
+	c.contents[moduleURL] = content
+	return localPath
+}
+
+func (c *moduleCache) addImportSpec(spec, fullURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.importSpecs[spec] = fullURL
+}
+
+func (c *moduleCache) writeImportMap() error {
+	c.mu.Lock()
+	importMapEntries := make(map[string]string)
+
+	for spec, fullURL := range c.importSpecs {
+		if localPath, exists := c.modules[fullURL]; exists {
+			importMapEntries[spec] = "./" + filepath.Join(c.outputDir, localPath)
+		}
+	}
+
+	if c.importName != "" {
+		if localPath, exists := c.modules[c.entryURL]; exists {
+			importMapEntries[c.importName] = "./" + filepath.Join(c.outputDir, localPath)
+		}
+	}
+	c.mu.Unlock()
+
+	importMap := map[string]map[string]string{
+		"imports": importMapEntries,
+	}
+
+	data, err := json.MarshalIndent(importMap, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(c.outputDir, "importmap.json"), data, 0644)
+}
+
+func urlToPath(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		hash := sha256.Sum256([]byte(rawURL))
+		return "invalid-" + hex.EncodeToString(hash[:8]) + ".js"
+	}
+
+	path := filepath.Join(u.Host, u.Path)
+
+	if !strings.HasSuffix(path, ".js") && !strings.HasSuffix(path, ".mjs") {
+		path = path + ".js"
+	}
+
+	return path
+}
+
+func downloadURL(rawURL string) (string, error) {
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, rawURL)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+func resolveURL(base *url.URL, ref string) string {
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return ref
+	}
+	refURL, err := url.Parse(ref)
+	if err != nil {
+		return ref
+	}
+	return base.ResolveReference(refURL).String()
+}
