@@ -16,29 +16,82 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 )
 
-// Config holds the configuration for caching ESM modules
+// Module represents a single ESM module to vendor
+type Module struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// Config holds the configuration for vendoring ESM modules
 type Config struct {
-	URL        string
-	OutputDir  string
-	ImportName string
+	OutputDir  string   `json:"output"`
+	ImportPath string   `json:"import"`
+	Modules    []Module `json:"modules"`
 }
 
 func Run(config Config) error {
+	if config.OutputDir == "" {
+		return fmt.Errorf("missing field `output`: output directory is required")
+	}
+	if config.ImportPath == "" {
+		return fmt.Errorf("missing field `import`: import path is required")
+	}
+
 	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
 		return err
 	}
 
+	// Create a shared cache for all dependencies
 	cache := &moduleCache{
 		outputDir:   config.OutputDir,
-		entryURL:    config.URL,
-		importName:  config.ImportName,
+		importPath:  config.ImportPath,
+		entryURLs:   make(map[string]string),
 		modules:     make(map[string]string),
 		contents:    make(map[string]string),
 		importSpecs: make(map[string]string),
 	}
 
+	// Process each dependency
+	for _, dep := range config.Modules {
+		fmt.Fprintf(os.Stderr, "Processing %s from %s...\n", dep.Name, dep.URL)
+		if err := processDependency(dep, cache); err != nil {
+			return fmt.Errorf("failed to process %s: %w", dep.Name, err)
+		}
+	}
+
+	// Write all downloaded modules to disk
+	cache.mu.Lock()
+	contentsCopy := make(map[string]string, len(cache.contents))
+	for k, v := range cache.contents {
+		contentsCopy[k] = v
+	}
+	cache.mu.Unlock()
+
+	for moduleURL, content := range contentsCopy {
+		cache.mu.Lock()
+		localPath := cache.modules[moduleURL]
+		cache.mu.Unlock()
+
+		fullPath := filepath.Join(config.OutputDir, localPath)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+
+	return cache.writeImportMap()
+}
+
+func processDependency(dep Module, cache *moduleCache) error {
+	// Store the entry URL for this dependency
+	cache.mu.Lock()
+	cache.entryURLs[dep.Name] = dep.URL
+	cache.mu.Unlock()
+
 	result := api.Build(api.BuildOptions{
-		EntryPoints: []string{config.URL},
+		EntryPoints: []string{dep.URL},
 		Bundle:      true,
 		Write:       false,
 		Format:      api.FormatESModule,
@@ -111,34 +164,13 @@ func Run(config Config) error {
 		return fmt.Errorf("build failed with %d errors", len(result.Errors))
 	}
 
-	cache.mu.Lock()
-	contentsCopy := make(map[string]string, len(cache.contents))
-	for k, v := range cache.contents {
-		contentsCopy[k] = v
-	}
-	cache.mu.Unlock()
-
-	for moduleURL, content := range contentsCopy {
-		cache.mu.Lock()
-		localPath := cache.modules[moduleURL]
-		cache.mu.Unlock()
-
-		fullPath := filepath.Join(config.OutputDir, localPath)
-		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
-			return err
-		}
-	}
-
-	return cache.writeImportMap()
+	return nil
 }
 
 type moduleCache struct {
 	outputDir   string
-	entryURL    string
-	importName  string
+	importPath  string
+	entryURLs   map[string]string // maps import name to entry URL
 	modules     map[string]string
 	contents    map[string]string
 	importSpecs map[string]string
@@ -169,15 +201,17 @@ func (c *moduleCache) writeImportMap() error {
 	c.mu.Lock()
 	importMapEntries := make(map[string]string)
 
+	// Add all import specs (transitive dependencies)
 	for spec, fullURL := range c.importSpecs {
 		if localPath, exists := c.modules[fullURL]; exists {
-			importMapEntries[spec] = "./" + filepath.Join(c.outputDir, localPath)
+			importMapEntries[spec] = filepath.Join(c.importPath, localPath)
 		}
 	}
 
-	if c.importName != "" {
-		if localPath, exists := c.modules[c.entryURL]; exists {
-			importMapEntries[c.importName] = "./" + filepath.Join(c.outputDir, localPath)
+	// Add named entry points for each dependency
+	for importName, entryURL := range c.entryURLs {
+		if localPath, exists := c.modules[entryURL]; exists {
+			importMapEntries[importName] = filepath.Join(c.importPath, localPath)
 		}
 	}
 	c.mu.Unlock()

@@ -1,7 +1,2 @@
 esm-cache
-*.exe
-*.test
-*.out
-go.work
-cache/
-dist/
+public/js/vendor/

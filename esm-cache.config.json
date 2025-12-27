@@ -1,0 +1,14 @@
+{
+  "output": "public/js/vendor",
+  "import": "/js/vendor",
+  "modules": [
+    {
+      "name": "d3",
+      "url": "https://esm.sh/d3@7"
+    },
+    {
+      "name": "confetti",
+      "url": "https://esm.sh/canvas-confetti@1.6.0"
+    }
+  ]
+}
